@@ -12,6 +12,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New Features
+
+- New opt-in Claude Code hook, `codegraph gate-hook`, for when an agent keeps reaching for grep in an indexed project. Registered for `PreToolUse` and `PostToolUse` (see the README), it turns away Grep, Glob and `rg`/`grep`/`find`/`fd` until the session has made one CodeGraph query. After that, text search works again for literals and non-code files. Searches inside `node_modules` are never blocked, and `CODEGRAPH_NO_GATE_HOOK=1` turns it off.
+
 ### Fixes
 
 - On Windows, terminal windows no longer flash open and closed while CodeGraph runs in the background. Since 1.6.1, a background MCP server popped up a console window (a full Windows Terminal window when that is the default terminal) several times when it started and again every time it re-synced a changed file. All of CodeGraph's git calls now run hidden. Thanks @Suharaz, @23q3, @A-Van-Gestel and @HarryMuc. (#2094, #2096)
