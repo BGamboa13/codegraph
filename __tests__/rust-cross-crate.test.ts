@@ -176,3 +176,20 @@ pub fn own(h: &Handle) -> u32 { h.n }
   expect(refs('crates/server/src/multi/handle.rs', 'Handle')).not.toContain('crates/server/src/user.rs:drv');
   expect(refs('crates/server/src/multi/handle.rs', 'Handle')).toContain('crates/server/src/user.rs:own');
 });
+
+it('leaves a path-dependency key unresolved when two crates bind it to different directories', async () => {
+  const pkg = (name: string, dep = '') => `[package]\nname = "${name}"\nversion = "0.1.0"\nedition = "2021"\n${dep}`;
+  await index({
+    'Cargo.toml': '[workspace]\nmembers = ["crates/server", "crates/client"]\n',
+    'crates/server/Cargo.toml': pkg('server', '\n[dependencies]\nutil = { path = "../../libs/util_a", package = "util_a" }\n'),
+    'crates/server/src/lib.rs': 'pub fn s() -> u32 { util::unique_a(1) }\n',
+    'crates/client/Cargo.toml': pkg('client', '\n[dependencies]\nutil = { path = "../../libs/util_b", package = "util_b" }\n'),
+    'crates/client/src/lib.rs': 'pub fn c() -> u32 { util::unique_b(2) }\n',
+    'libs/util_a/Cargo.toml': pkg('util_a'),
+    'libs/util_a/src/lib.rs': 'pub fn unique_a(n: u32) -> u32 { n }\npub fn unique_b(n: u32) -> u32 { n + 1 }\n',
+    'libs/util_b/Cargo.toml': pkg('util_b'),
+    'libs/util_b/src/lib.rs': 'pub fn unique_b(n: u32) -> u32 { n }\n',
+  });
+  // `client`'s `util` is util_b — it must never be answered with util_a's `unique_b`.
+  expect(sources('libs/util_a/src/lib.rs', 'unique_b')).not.toContain('crates/client/src/lib.rs:c');
+});

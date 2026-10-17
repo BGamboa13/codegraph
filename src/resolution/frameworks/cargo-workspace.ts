@@ -296,9 +296,23 @@ export function getCargoWorkspaceCrateMap(context: ResolutionContext): Map<strin
     addCrateAlias(result, packageName, memberPath);
   }
 
+  // The map is workspace-wide, but a dependency key is per manifest: two crates
+  // may bind `util` to different directories. A key with more than one target
+  // is dropped — unresolved beats resolving one crate's `util::` to the other's.
+  const depDirs = new Map<string, Set<string>>();
   for (const [manifestDir, manifest] of manifests) {
     for (const [depName, depDir] of parsePathDependencies(manifest, manifestDir)) {
       if (result.has(depName) || !context.readFile(`${depDir}/Cargo.toml`)) continue;
+      const key = depName.replace(/-/g, '_');
+      const dirs = depDirs.get(key) ?? new Set<string>();
+      dirs.add(depDir);
+      depDirs.set(key, dirs);
+    }
+  }
+  for (const [manifestDir, manifest] of manifests) {
+    for (const [depName, depDir] of parsePathDependencies(manifest, manifestDir)) {
+      if (result.has(depName) || !context.readFile(`${depDir}/Cargo.toml`)) continue;
+      if (depDirs.get(depName.replace(/-/g, '_'))!.size > 1) continue;
       addCrateAlias(result, depName, depDir);
     }
   }
