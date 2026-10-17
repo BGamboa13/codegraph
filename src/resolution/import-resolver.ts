@@ -427,7 +427,7 @@ export function isExternalImport(
   // workspace map first so they aren't misclassified as external (#629). The
   // map is null for single-package repos, so this is a no-op there.
   const workspaces = context?.getWorkspacePackages?.();
-  if (workspaces && resolveWorkspaceImport(importPath, workspaces)) {
+  if (workspaces && resolveWorkspaceImport(importPath, workspaces).length > 0) {
     return false;
   }
 
@@ -626,14 +626,23 @@ function resolveAliasedImport(
   }
 
   // 1.5 Workspace packages (`@scope/ui/widgets` → `packages/ui/widgets`).
-  //     Resolves a monorepo member import to the member's directory; the
-  //     extension/index permutations below then find its barrel (#629).
+  //     A member import resolves to its declared `exports`/`main` entry first,
+  //     then a `src/` sibling of build output, then the member's directory —
+  //     the extension/index permutations below find its barrel (#629). A
+  //     DECLARED target must resolve to an INDEXED project file; one absent
+  //     from the graph (a gitignored `dist/` present on disk) must not end
+  //     resolution while the directory convention would still resolve. The
+  //     last candidate is always the directory fallback, accepted as-is so
+  //     downstream size/read guards still see e.g. an excluded package archive.
   const workspaces = context.getWorkspacePackages?.();
   if (workspaces) {
-    const base = resolveWorkspaceImport(importPath, workspaces);
-    if (base) {
-      const hit = tryWithExt(base);
-      if (hit) return hit;
+    const candidates = resolveWorkspaceImport(importPath, workspaces);
+    for (let i = 0; i < candidates.length; i++) {
+      const hit = tryWithExt(candidates[i]!);
+      if (!hit) continue;
+      if (i === candidates.length - 1 || context.getNodesInFile(hit).some((n) => n.kind === 'file')) {
+        return hit;
+      }
     }
   }
 
@@ -1549,9 +1558,17 @@ function isJsPathSpecifier(name: string): boolean {
  * A JS/TS `imports` reference that names a module by path. It names a FILE, not
  * a symbol, so it skips the resolver's name-exists pre-filter — a CommonJS
  * `require('./x')` has no import node of that name to pass it.
+ *
+ * A bare scoped WORKSPACE MEMBER (`@scope/ui`) is also a path here even though
+ * it looks exactly like an npm package: the workspace map is the only place
+ * that knows, and without this the file→file `imports` edge is never created
+ * for it. Arbitrary npm specifiers (`react`, `@types/x`) stay non-paths.
  */
-export function isJsPathImportRef(ref: UnresolvedRef): boolean {
-  return ref.referenceKind === 'imports' && JS_MODULE_LANGUAGES.has(ref.language) && isJsPathSpecifier(ref.referenceName);
+export function isJsPathImportRef(ref: UnresolvedRef, context?: ResolutionContext): boolean {
+  if (ref.referenceKind !== 'imports' || !JS_MODULE_LANGUAGES.has(ref.language)) return false;
+  if (isJsPathSpecifier(ref.referenceName)) return true;
+  const workspaces = context?.getWorkspacePackages?.();
+  return Boolean(workspaces && resolveWorkspaceImport(ref.referenceName, workspaces).length > 0);
 }
 
 /** PHP reference kinds whose name is a class name, written as in the source. */
@@ -1630,7 +1647,7 @@ export function resolveViaImport(
   // found the way the runtime finds it: extensions, `index` files, path
   // aliases. Matching the basename instead missed every extensionless one
   // (the common spelling) and could land on a same-named file elsewhere.
-  if (isJsPathImportRef(ref)) {
+  if (isJsPathImportRef(ref, context)) {
     const file = resolveImportPath(ref.referenceName, ref.filePath, ref.language, context);
     const fileNode = file && file !== ref.filePath ? context.getNodesInFile(file).find((n) => n.kind === 'file') : undefined;
     if (fileNode) return { original: ref, targetNodeId: fileNode.id, confidence: 0.9, resolvedBy: 'import' };
