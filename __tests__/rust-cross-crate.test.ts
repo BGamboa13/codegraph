@@ -152,3 +152,27 @@ pub fn drain() -> usize {
   expect(sources('crates/server/src/ledger.rs', 'KEY_RANK_COUNT', 'imports').length).toBeGreaterThan(0);
   expect(sources('crates/server/src/ledger.rs', 'LIMIT', 'imports').length).toBeGreaterThan(0);
 });
+
+it('resolves a module-qualified type by its own path, not through a same-name `use` import', async () => {
+  // tokio shape: `scheduler::Handle` / `driver::Handle` in a file that also
+  // `use`s a third `Handle` — the qualifier decides, never the file-level binding.
+  await index(base({
+    'lib.rs': 'pub mod scheduler;\npub mod driver;\npub mod multi;\n',
+    'scheduler.rs': 'pub enum Handle { A, B }\n',
+    'driver.rs': 'pub struct Handle { pub n: u32 }\n',
+    'multi/mod.rs': 'mod handle;\npub(crate) use handle::Handle;\n',
+    'multi/handle.rs': 'pub struct Handle { pub n: u32 }\n',
+    'user.rs': `use crate::multi::Handle;
+use crate::{driver, scheduler};
+pub fn sched(h: &scheduler::Handle) -> u32 { match h { scheduler::Handle::A => 1, _ => 2 } }
+pub fn drv(h: &driver::Handle) -> u32 { h.n }
+pub fn own(h: &Handle) -> u32 { h.n }
+`,
+  }));
+  const refs = (file: string, qn: string) => sources(file, qn, 'references');
+  expect(refs('crates/server/src/scheduler.rs', 'Handle')).toContain('crates/server/src/user.rs:sched');
+  expect(refs('crates/server/src/driver.rs', 'Handle')).toEqual(['crates/server/src/user.rs:drv']);
+  expect(refs('crates/server/src/multi/handle.rs', 'Handle')).not.toContain('crates/server/src/user.rs:sched');
+  expect(refs('crates/server/src/multi/handle.rs', 'Handle')).not.toContain('crates/server/src/user.rs:drv');
+  expect(refs('crates/server/src/multi/handle.rs', 'Handle')).toContain('crates/server/src/user.rs:own');
+});

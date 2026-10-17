@@ -338,6 +338,19 @@ function resolveRustPath(segments: string[], fromFile: string, context: Resoluti
 }
 
 /**
+ * The `a::b` written directly before a reference's leaf (`scheduler` for
+ * `&scheduler::Handle`), or null when it is written bare or its position
+ * can't be read back from the source.
+ */
+function rustWrittenQualifier(ref: UnresolvedRef, context: ResolutionContext): string[] | null {
+  const line = context.getFileLines?.(ref.filePath)?.[ref.line - 1] ?? context.readFile(ref.filePath)?.split(/\r?\n/)[ref.line - 1];
+  if (line === undefined || !line.startsWith(ref.referenceName, ref.column)) return null;
+  const before = /((?:[A-Za-z_]\w*\s*::\s*)+)$/.exec(line.slice(0, ref.column));
+  if (!before) return null;
+  return before[1]!.split('::').map((s) => s.trim()).filter((s) => s.length > 0);
+}
+
+/**
  * Resolve a Rust reference written as a path (`crate::m::Item`,
  * `sim::items::ItemPool::for_def`, `super::f`), or a bare name the file binds
  * with a `use` (`roll_item` under `use sim::items::roll_item;`), to the node
@@ -352,9 +365,17 @@ function resolveRustPath(segments: string[], fromFile: string, context: Resoluti
 export function resolveRustPathReference(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
   let segments = ref.referenceName.split('::').filter((s) => s.length > 0);
   if (segments.length === 1) {
-    const bound = rustUsesInFile(ref.filePath, context).bindings.get(segments[0]!);
-    if (!bound) return null;
-    segments = bound.split('::');
+    // The extractor keeps only the leaf of `&scheduler::Handle`; the source says
+    // whether it was written through a path. A path resolves by its own
+    // segments — a file-level `use …::Handle` is a different `Handle`.
+    const qualifier = rustWrittenQualifier(ref, context);
+    if (qualifier) {
+      segments = [...qualifier, segments[0]!];
+    } else {
+      const bound = rustUsesInFile(ref.filePath, context).bindings.get(segments[0]!);
+      if (!bound) return null;
+      segments = bound.split('::');
+    }
   }
   const target = resolveRustPath(segments, ref.filePath, context, 0);
   if (!target || target.filePath === ref.filePath) return null;
