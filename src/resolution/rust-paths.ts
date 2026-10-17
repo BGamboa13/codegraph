@@ -343,11 +343,17 @@ function resolveRustPath(segments: string[], fromFile: string, context: Resoluti
  * can't be read back from the source.
  */
 function rustWrittenQualifier(ref: UnresolvedRef, context: ResolutionContext): string[] | null {
-  const line = context.getFileLines?.(ref.filePath)?.[ref.line - 1] ?? context.readFile(ref.filePath)?.split(/\r?\n/)[ref.line - 1];
+  const lines = context.getFileLines?.(ref.filePath) ?? context.readFile(ref.filePath)?.split(/\r?\n/);
+  const line = lines?.[ref.line - 1];
   if (line === undefined || !line.startsWith(ref.referenceName, ref.column)) return null;
-  const before = /((?:[A-Za-z_]\w*\s*::\s*)+)$/.exec(line.slice(0, ref.column));
-  if (!before) return null;
-  return before[1]!.split('::').map((s) => s.trim()).filter((s) => s.length > 0);
+  let before = line.slice(0, ref.column);
+  // `scheduler::\n    Handle`: the leaf starts its line, the qualifier ends the previous one.
+  for (let i = ref.line - 2; i >= 0 && ref.line - 2 - i < 3 && before.trim() === ''; i--) {
+    before = lines![i]! + before;
+  }
+  const qualified = /((?:[A-Za-z_]\w*\s*::\s*)+)$/.exec(before);
+  if (!qualified) return null;
+  return qualified[1]!.split('::').map((s) => s.trim()).filter((s) => s.length > 0);
 }
 
 /**

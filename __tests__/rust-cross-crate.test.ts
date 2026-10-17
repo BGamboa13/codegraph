@@ -177,6 +177,24 @@ pub fn own(h: &Handle) -> u32 { h.n }
   expect(refs('crates/server/src/multi/handle.rs', 'Handle')).toContain('crates/server/src/user.rs:own');
 });
 
+it('reads a module qualifier written across lines, instead of falling back to the same-name `use` import', async () => {
+  await index(base({
+    'lib.rs': 'pub mod scheduler;\npub mod multi;\n',
+    'scheduler.rs': 'pub enum Handle { A, B }\n',
+    'multi/mod.rs': 'mod handle;\npub(crate) use handle::Handle;\n',
+    'multi/handle.rs': 'pub struct Handle { pub n: u32 }\n',
+    'user.rs': `use crate::multi::Handle;
+use crate::scheduler;
+pub fn sched(
+    h: &scheduler::
+        Handle,
+) -> u32 { 1 }
+`,
+  }));
+  expect(sources('crates/server/src/scheduler.rs', 'Handle', 'references')).toContain('crates/server/src/user.rs:sched');
+  expect(sources('crates/server/src/multi/handle.rs', 'Handle', 'references')).not.toContain('crates/server/src/user.rs:sched');
+});
+
 it('leaves a path-dependency key unresolved when two crates bind it to different directories', async () => {
   const pkg = (name: string, dep = '') => `[package]\nname = "${name}"\nversion = "0.1.0"\nedition = "2021"\n${dep}`;
   await index({
