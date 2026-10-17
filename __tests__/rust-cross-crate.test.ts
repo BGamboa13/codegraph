@@ -195,6 +195,34 @@ pub fn sched(
   expect(sources('crates/server/src/multi/handle.rs', 'Handle', 'references')).not.toContain('crates/server/src/user.rs:sched');
 });
 
+it('does not read a commented-out path above a leaf as its qualifier', async () => {
+  await index(base({
+    'lib.rs': 'pub mod scheduler;\npub mod multi;\n',
+    'scheduler.rs': 'pub struct Handle { pub n: u32 }\nimpl Handle { pub fn new() -> Handle { Handle { n: 0 } } }\n',
+    'multi/mod.rs': 'mod handle;\npub(crate) use handle::Handle;\n',
+    'multi/handle.rs': 'pub struct Handle { pub n: u32 }\nimpl Handle { pub fn new() -> Handle { Handle { n: 1 } } }\n',
+    'user.rs': `use crate::multi::Handle;
+pub fn make() -> Handle {
+    // crate::scheduler::
+    Handle { n: 3 }
+}
+pub fn make_block() -> Handle {
+    /* crate::scheduler:: */
+    Handle { n: 4 }
+}
+`,
+  }));
+  /** Every file:function with any edge into the file's `Handle` type or its `new`. */
+  const touches = (file: string) => cg!.getNodesInFile(file)
+    .filter((n) => n.name === 'Handle' || n.name === 'new')
+    .flatMap((n) => cg!.getIncomingEdges(n.id).map((e) => cg!.getNode(e.source)!))
+    .map((src) => `${src.filePath}:${src.qualifiedName}`);
+  for (const fn of ['make', 'make_block']) {
+    expect(touches('crates/server/src/scheduler.rs')).not.toContain(`crates/server/src/user.rs:${fn}`);
+    expect(touches('crates/server/src/multi/handle.rs')).toContain(`crates/server/src/user.rs:${fn}`);
+  }
+});
+
 it('leaves a path-dependency key unresolved when two crates bind it to different directories', async () => {
   const pkg = (name: string, dep = '') => `[package]\nname = "${name}"\nversion = "0.1.0"\nedition = "2021"\n${dep}`;
   await index({

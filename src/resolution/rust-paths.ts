@@ -346,10 +346,15 @@ function rustWrittenQualifier(ref: UnresolvedRef, context: ResolutionContext): s
   const lines = context.getFileLines?.(ref.filePath) ?? context.readFile(ref.filePath)?.split(/\r?\n/);
   const line = lines?.[ref.line - 1];
   if (line === undefined || !line.startsWith(ref.referenceName, ref.column)) return null;
-  let before = line.slice(0, ref.column);
+  // Comments are blanked (offset-preserving) over the lines read back, so a
+  // `// crate::scheduler::` note above the leaf is not taken as its qualifier.
+  const first = Math.max(0, ref.line - 4);
+  const window = [...lines!.slice(first, ref.line - 1), line.slice(0, ref.column)];
+  const stripped = stripCommentsForRegex(window.join('\n'), 'rust').split('\n');
+  let before = stripped[stripped.length - 1]!;
   // `scheduler::\n    Handle`: the leaf starts its line, the qualifier ends the previous one.
-  for (let i = ref.line - 2; i >= 0 && ref.line - 2 - i < 3 && before.trim() === ''; i--) {
-    before = lines![i]! + before;
+  for (let i = stripped.length - 2; i >= 0 && before.trim() === ''; i--) {
+    before = stripped[i]! + before;
   }
   const qualified = /((?:[A-Za-z_]\w*\s*::\s*)+)$/.exec(before);
   if (!qualified) return null;
