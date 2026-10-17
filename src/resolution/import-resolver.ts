@@ -209,6 +209,7 @@ export function clearImportResolverMemos(context: ResolutionContext): void {
   cobolCopybookIndexes.delete(context);
   pythonModuleFileMemos.delete(context);
   pyFunctionScopes.delete(context);
+  pyFileInfos.delete(context);
   PY_MODULE_SYMBOLS.delete(context);
   clearRustPathMemos(context);
 }
@@ -1973,6 +1974,68 @@ interface PyScope {
 
 const pyFunctionScopes = new WeakMap<ResolutionContext, Map<string, PyScope[]>>();
 
+type PyLine = { indent: number; text: string; start: number; end: number };
+
+/** A Python file read once: its comment/string-blanked logical statements and its defs, for every function scope built from it. */
+interface PyFileInfo {
+  lines: PyLine[];
+  /** Functions and methods, by start line. */
+  fns: Node[];
+  /** Innermost function around a function (null: none), by node id. */
+  outers: Map<string, Node | null>;
+  /** `fnId\0name` → whether the function's own text has `name` as a word. */
+  mentions: Map<string, boolean>;
+  size: number;
+}
+
+const pyFileInfos = new WeakMap<ResolutionContext, Map<string, PyFileInfo>>();
+/** Characters of statement text kept per context; the oldest files are dropped past it. */
+const PY_FILE_INFO_BUDGET = 48_000_000;
+
+function pyFileInfo(filePath: string, context: ResolutionContext): PyFileInfo {
+  let memo = pyFileInfos.get(context);
+  if (!memo) pyFileInfos.set(context, (memo = new Map()));
+  const hit = memo.get(filePath);
+  if (hit) return hit;
+  const src = context.readFile(filePath) ?? '';
+  const lines = pyLogicalLines(blankStringContents(stripCommentsForRegex(src, 'python')));
+  const fns = context.getNodesInFile(filePath)
+    .filter((n) => n.kind === 'function' || n.kind === 'method')
+    .sort((a, b) => a.startLine - b.startLine);
+  const info: PyFileInfo = { lines, fns, outers: new Map(), mentions: new Map(), size: src.length };
+  memo.set(filePath, info);
+  let total = 0;
+  for (const f of memo.values()) total += f.size;
+  for (const key of memo.keys()) {
+    if (total <= PY_FILE_INFO_BUDGET || key === filePath) break;
+    total -= memo.get(key)!.size;
+    memo.delete(key);
+  }
+  return info;
+}
+
+/** The file's logical lines lying within `fn`. */
+function pyLinesWithin(info: PyFileInfo, fn: Node): PyLine[] {
+  let lo = 0;
+  let hi = info.lines.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (info.lines[mid]!.start < fn.startLine) lo = mid + 1;
+    else hi = mid;
+  }
+  let end = lo;
+  while (end < info.lines.length && info.lines[end]!.end <= fn.endLine) end++;
+  return info.lines.slice(lo, end);
+}
+
+/** Whether `text` holds `word` as a whole identifier. */
+function pyHasWord(text: string, word: string): boolean {
+  for (let at = text.indexOf(word); at >= 0; at = text.indexOf(word, at + 1)) {
+    if (!/\w/.test(text[at - 1] ?? '') && !/\w/.test(text[at + word.length] ?? '')) return true;
+  }
+  return false;
+}
+
 const PY_DEF_RE = /^(?:async\s+)?def\s+(\w+)\s*\(/;
 const PY_CLASS_RE = /^class\s+(\w+)/;
 
@@ -2116,9 +2179,7 @@ function pyScopesOf(fn: Node, context: ResolutionContext): PyScope[] {
   if (!memo) pyFunctionScopes.set(context, (memo = new Map()));
   const hit = memo.get(fn.id);
   if (hit) return hit;
-  const src = context.readFile(fn.filePath) ?? '';
-  const lines = pyLogicalLines(blankStringContents(stripCommentsForRegex(src, 'python')))
-    .filter((l) => l.start >= fn.startLine && l.end <= fn.endLine);
+  const lines = pyLinesWithin(pyFileInfo(fn.filePath, context), fn);
   const root: PyScope = { isClass: false, parent: null, start: fn.startLine, end: fn.endLine, params: new Set(), statements: [], binds: new Map() };
   const scopes = [root];
   const stack: Array<{ scope: PyScope; indent: number }> = [{ scope: root, indent: -1 }];
@@ -2219,22 +2280,39 @@ export function isPythonReceiverRebound(ref: UnresolvedRef, receiver: string, co
   if (!fn || (fn.kind !== 'function' && fn.kind !== 'method')) return false;
   const id = receiver.split('.')[0]!;
   if (!/^[A-Za-z_]\w*$/.test(id)) return false;
-  const scopes = pyScopesOf(fn, context);
-  let inner = scopes[0]!;
-  for (const s of scopes) if (s.start <= ref.line && ref.line <= s.end && s.start >= inner.start) inner = s;
+  const info = pyFileInfo(fn.filePath, context);
   let imported = false;
-  for (let s: PyScope | null = inner; s; s = s.parent) {
-    if (s.isClass && s !== inner) continue; // a class body is not visible from the defs inside it
-    const binds = pyScopeBinds(s, id);
-    if (binds === 'bind') return true;
-    if (binds === 'import') imported = true;
-    const own = s.statements.find((st) => st.start <= ref.line && ref.line <= st.end);
-    if (own && pyStatementShadows(own.text, id)) return true;
+  const mentionKey = `${fn.id}\0${id}`;
+  let mentioned = info.mentions.get(mentionKey);
+  if (mentioned === undefined) {
+    mentioned = pyLinesWithin(info, fn).some((l) => pyHasWord(l.text, id));
+    info.mentions.set(mentionKey, mentioned);
+  }
+  // Only a function whose own text names the receiver can rebind it.
+  if (mentioned) {
+    const scopes = pyScopesOf(fn, context);
+    let inner = scopes[0]!;
+    for (const s of scopes) if (s.start <= ref.line && ref.line <= s.end && s.start >= inner.start) inner = s;
+    for (let s: PyScope | null = inner; s; s = s.parent) {
+      if (s.isClass && s !== inner) continue; // a class body is not visible from the defs inside it
+      const binds = pyScopeBinds(s, id);
+      if (binds === 'bind') return true;
+      if (binds === 'import') imported = true;
+      const own = s.statements.find((st) => st.start <= ref.line && ref.line <= st.end);
+      if (own && pyStatementShadows(own.text, id)) return true;
+    }
   }
   // A def nested in another function sees that function's locals (a closure).
-  const outer = context.getNodesInFile(fn.filePath)
-    .filter((n) => n.id !== fn.id && (n.kind === 'function' || n.kind === 'method') && n.startLine <= fn.startLine && n.endLine >= fn.endLine)
-    .sort((a, b) => (a.endLine - a.startLine) - (b.endLine - b.startLine))[0];
+  let outer = info.outers.get(fn.id);
+  if (outer === undefined) {
+    outer = null;
+    for (const n of info.fns) {
+      if (n.startLine > fn.startLine) break;
+      if (n.id === fn.id || n.endLine < fn.endLine) continue;
+      if (!outer || n.endLine - n.startLine < outer.endLine - outer.startLine) outer = n;
+    }
+    info.outers.set(fn.id, outer);
+  }
   if (outer && isPythonReceiverRebound({ ...ref, fromNodeId: outer.id, line: fn.startLine }, id, context)) return true;
   if (!imported) return false;
   const specs = new Set<string>();
