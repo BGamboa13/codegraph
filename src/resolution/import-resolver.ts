@@ -2099,12 +2099,40 @@ function pyTargetNames(text: string): Set<string> {
   return names;
 }
 
+/** Names a `match` case pattern captures: bare names, not dotted values, class names, keyword names or literals. */
+function pyPatternCaptures(pattern: string): Set<string> {
+  const names = new Set<string>();
+  for (const m of pattern.matchAll(/[A-Za-z_]\w*/g)) {
+    const before = pattern.slice(0, m.index);
+    const after = pattern.slice(m.index + m[0].length);
+    if (/\.\s*$/.test(before) || /\w$/.test(before)) continue; // `a.b` attribute, `1e5` literal
+    if (/^\s*[.(]/.test(after) || /^\s*=(?!=)/.test(after)) continue;
+    if (m[0] === '_' || m[0] === 'None' || m[0] === 'True' || m[0] === 'False') continue;
+    names.add(m[0]);
+  }
+  return names;
+}
+
 /** What one logical statement does to `id`: rebinds it, imports it locally, or neither. */
 function pyStatementBinds(statement: string, id: string): 'bind' | 'import' | null {
   const text = statement.trim();
   const named = PY_DEF_RE.exec(text)?.[1] ?? PY_CLASS_RE.exec(text)?.[1];
   if (named !== undefined) return named === id ? 'bind' : null;
   if (/:=/.test(text) && new RegExp(`\\b${id}\\s*:=`).test(text.replace(/\blambda\b[^:]*:/g, ' '))) return 'bind';
+
+  // `case db:`, `case [db, *_]:`, `case Point(x=db) if ok:` — a capture pattern binds, then an optional inline body.
+  const caseHead = /^case\s+(?![=.,)\]:;])/.exec(text);
+  if (caseHead) {
+    const colon = pyDepthZero(text).indexOf(':', caseHead[0].length);
+    if (colon > 0) {
+      let pattern = text.slice(caseHead[0].length, colon);
+      const guardAt = pyDepthZero(pattern).search(/\bif\b/);
+      if (guardAt >= 0) pattern = pattern.slice(0, guardAt);
+      if (pyPatternCaptures(pattern).has(id)) return 'bind';
+      const rest = text.slice(colon + 1);
+      return rest.trim() ? pyStatementBinds(rest, id) : null;
+    }
+  }
 
   // `if c: x = 1`, `for x in xs: ...`, `with a as x: ...`, `else: x = 1` — header, then an optional inline body.
   const header = /^(?:async\s+)?(if|elif|while|for|with|except|else|try|finally)\b\*?/.exec(text);
@@ -2237,6 +2265,30 @@ function pyScopesOf(fn: Node, context: ResolutionContext): PyScope[] {
   return scopes;
 }
 
+/** The import specs (as `source\0name\0isNamespace`, matching the file's mappings) a scope's local imports bind to `id`; `?` when unreadable. */
+function pyScopeImportKeys(scope: PyScope, id: string): Set<string> {
+  const keys = new Set<string>();
+  for (const st of scope.statements) {
+    if (pyStatementBinds(st.text, id) !== 'import') continue;
+    const text = st.text.trim();
+    const from = /^from\s+([\w.]+)\s+import\s+(.+)$/.exec(text);
+    const plain = from ? null : /^import\s+(.+)$/.exec(text);
+    let found = false;
+    if (from || plain) {
+      for (const item of (from ?? plain)![from ? 2 : 1]!.replace(/[()]/g, ' ').split(',')) {
+        const [name, alias] = item.trim().split(/\s+as\s+/);
+        if (!name) continue;
+        if ((alias ?? (from ? name : name.split('.')[0])) !== id) continue;
+        found = true;
+        if (from) keys.add(`${from[1]}\0${name}\0false`);
+        else keys.add(`${alias ? name : name.split('.')[0]}\0*\0true`);
+      }
+    }
+    if (!found) keys.add('?'); // `if c: import x as y`, `a; import x` — not worth parsing
+  }
+  return keys;
+}
+
 function pyScopeBinds(scope: PyScope, id: string): 'bind' | 'import' | null {
   if (scope.binds.has(id)) return scope.binds.get(id)!;
   let result: 'bind' | 'import' | null = scope.params.has(id) ? 'bind' : null;
@@ -2271,8 +2323,9 @@ function pyStatementShadows(text: string, id: string): boolean {
  * variable or lambda parameter only shadows inside its own expression, so it
  * counts only on the call's own statement. A parameter of a def NOT around the
  * call, keyword arguments (`x=x`), and text in comments do not count. A
- * function-local `import … as x` is a rebinding only when the file binds `x`
- * to more than one module (which one the call means is then unknowable).
+ * function-local `import … as x` is a rebinding only when it binds `x` to a
+ * different module than the file does, or the file binds `x` to more than one
+ * module (which one the call means is then unknowable).
  * Module-level code and an unreadable node report false.
  */
 export function isPythonReceiverRebound(ref: UnresolvedRef, receiver: string, context: ResolutionContext): boolean {
@@ -2281,7 +2334,7 @@ export function isPythonReceiverRebound(ref: UnresolvedRef, receiver: string, co
   const id = receiver.split('.')[0]!;
   if (!/^[A-Za-z_]\w*$/.test(id)) return false;
   const info = pyFileInfo(fn.filePath, context);
-  let imported = false;
+  const localImports = new Set<string>();
   const mentionKey = `${fn.id}\0${id}`;
   let mentioned = info.mentions.get(mentionKey);
   if (mentioned === undefined) {
@@ -2297,7 +2350,7 @@ export function isPythonReceiverRebound(ref: UnresolvedRef, receiver: string, co
       if (s.isClass && s !== inner) continue; // a class body is not visible from the defs inside it
       const binds = pyScopeBinds(s, id);
       if (binds === 'bind') return true;
-      if (binds === 'import') imported = true;
+      if (binds === 'import') for (const k of pyScopeImportKeys(s, id)) localImports.add(k);
       const own = s.statements.find((st) => st.start <= ref.line && ref.line <= st.end);
       if (own && pyStatementShadows(own.text, id)) return true;
     }
@@ -2314,12 +2367,14 @@ export function isPythonReceiverRebound(ref: UnresolvedRef, receiver: string, co
     info.outers.set(fn.id, outer);
   }
   if (outer && isPythonReceiverRebound({ ...ref, fromNodeId: outer.id, line: fn.startLine }, id, context)) return true;
-  if (!imported) return false;
+  if (localImports.size === 0) return false;
   const specs = new Set<string>();
   for (const imp of context.getImportMappings(ref.filePath, ref.language)) {
     if (imp.localName === id) specs.add(`${imp.source}\0${imp.exportedName}\0${imp.isNamespace}`);
   }
-  return specs.size > 1;
+  if (specs.size > 1) return true;
+  // A local import is the file's own binding unless it names a different module.
+  return specs.size === 1 && [...localImports].some((k) => !specs.has(k));
 }
 
 /**

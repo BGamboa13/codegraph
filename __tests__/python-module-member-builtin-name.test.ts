@@ -209,3 +209,88 @@ def augmented(helpers):
   expect(callers('src/pkg/helpers.py', 'get')).toEqual(['tests/scoped.py:local_import_alias']);
   expect(callers('src/pkg/helpers.py', 'items')).toEqual(['tests/scoped.py:comprehension']);
 });
+
+// A function-local import binds the name to whatever module it names, and a
+// `match` capture pattern binds it too: neither is the file-level module.
+const LOCAL_REBIND = {
+  'pyproject.toml': '[project]\nname = "pkg"\n',
+  'src/pkg/__init__.py': '',
+  'src/pkg/other.py': 'def get(key=None):\n    return key\n\n\ndef update(x=None):\n    return x\n',
+  'src/pkg/third.py': 'def get(key=None):\n    return key\n',
+  // Separate files: the file-level mappings of one file list every import in it, local or not.
+  'tests/local_same.py': `from pkg import other
+
+
+def top():
+    return other.get(0)
+
+
+def same_module():
+    from pkg import other
+    return other.get(1)
+`,
+  'tests/local_from.py': `from pkg import other
+
+
+def other_module_from():
+    from pkg import third as other
+    return other.get(2)
+`,
+  'tests/local_import.py': `from pkg import other
+
+
+def other_module_import():
+    import pkg.third as other
+    return other.get(3)
+`,
+  'tests/local_match.py': `from pkg import other
+
+
+def match_capture(v):
+    match v:
+        case other:
+            return other.get(5)
+
+
+def match_sequence(v):
+    match v:
+        case [other, *_]:
+            return other.update(6)
+
+
+def match_class(v):
+    match v:
+        case Point(x=other) if other:
+            return other.get(7)
+
+
+def match_mapping(v):
+    match v:
+        case {"k": other}:
+            return other.update(8)
+
+
+def match_not_a_capture(v):
+    match v:
+        case Point(other=1):
+            return other.get(9)
+        case mod.other:
+            return other.update(10)
+
+
+def case_is_a_name():
+    case = 1
+    return other.get(case)
+`,
+};
+
+it('treats a function-local import of a different module, or a match capture, as a rebinding', async () => {
+  await index(LOCAL_REBIND);
+  expect(callers('src/pkg/other.py', 'get')).toEqual([
+    'tests/local_match.py:case_is_a_name',
+    'tests/local_match.py:match_not_a_capture',
+    'tests/local_same.py:same_module',
+    'tests/local_same.py:top',
+  ]);
+  expect(callers('src/pkg/other.py', 'update')).toEqual(['tests/local_match.py:match_not_a_capture']);
+});
