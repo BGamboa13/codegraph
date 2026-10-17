@@ -1957,6 +1957,32 @@ export function resolveViaImport(
 }
 
 /**
+ * Whether the function a Python reference sits in rebinds `receiver` itself —
+ * as a parameter, `with … as x`, `except … as x`, `for x in`, a lambda
+ * parameter, or a plain/walrus assignment. Then `x.method()` is a call on that
+ * local, not on the module an import bound to the same name at file level.
+ * Reads the function's own text, so it errs toward "rebound" (a mention in a
+ * string or comment) — the safe direction: an unresolved reference, never a
+ * wrong edge. Module-level code and an unreadable node report false.
+ */
+export function isPythonReceiverRebound(ref: UnresolvedRef, receiver: string, context: ResolutionContext): boolean {
+  const fn = context.getNodeById?.(ref.fromNodeId);
+  if (!fn || (fn.kind !== 'function' && fn.kind !== 'method')) return false;
+  const lines = context.getFileLines?.(ref.filePath) ?? context.readFile(ref.filePath)?.split(/\r?\n/);
+  if (!lines) return false;
+  const text = lines.slice(fn.startLine - 1, fn.endLine).join('\n');
+  const id = receiver.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return [
+    new RegExp(`\\bas\\s+${id}\\b`),                                  // with/except/import … as x
+    new RegExp(`\\bfor\\s+(?:[\\w.,\\s()*]*[\\s,(])?${id}\\b[^\\n]*?\\bin\\b`), // for x in / for a, x in
+    new RegExp(`^[ \\t]*(?:[\\w.]+\\s*,\\s*)*${id}\\s*(?::[^=\\n]+)?=(?!=)`, 'm'), // x = … / x: T = … / x, y = …
+    new RegExp(`\\b${id}\\s*:=`),                                       // walrus
+    new RegExp(`\\blambda\\b[^:\\n]*\\b${id}\\b[^:\\n]*:`),             // lambda x: …
+    new RegExp(`\\bdef\\s+\\w+\\s*\\((?:[^)]*[,*\\s])?${id}\\s*[,:=)]`),  // def f(a, x, *x)
+  ].some((re) => re.test(text));
+}
+
+/**
  * Resolve a Python qualified reference whose receiver is an imported MODULE:
  * `certs.where()` after `from . import certs`, `mod.func()` after `import mod`
  * or `from pkg import mod`. The receiver names a submodule (a file), not a
@@ -1983,6 +2009,8 @@ function resolvePythonModuleMember(
   // The immediate member of the module (first segment after the receiver).
   const member = ref.referenceName.substring(dotIdx + 1).split('.')[0];
   if (!member) return null;
+  // A receiver the function rebinds is a local, not the imported module.
+  if (isPythonReceiverRebound(ref, receiver, context)) return null;
 
   for (const imp of imports) {
     if (imp.localName !== receiver) continue;

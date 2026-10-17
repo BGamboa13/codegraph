@@ -79,3 +79,52 @@ it('does not bind a builtin-method name on a local collection to a project funct
   expect(targetNames.has('get')).toBe(false);
   expect(targetNames.has('append')).toBe(false);
 });
+
+const SHADOW = {
+  'pyproject.toml': '[project]\nname = "pkg"\n',
+  'src/pkg/__init__.py': '',
+  'src/pkg/other.py': 'def write(x):\n    return x\n\n\ndef update(x):\n    return x\n',
+  'tests/shadow.py': `from pkg import other
+
+
+def real():
+    other.update({"b": 2})
+
+
+def by_param(other):
+    other.update({"a": 1})
+
+
+def by_with(path):
+    with open(path, "w") as other:
+        other.write("x")
+
+
+def by_assign():
+    other = {}
+    other.update({"c": 3})
+
+
+def by_for(items):
+    for other in items:
+        other.update(1)
+
+
+def by_except():
+    try:
+        pass
+    except OSError as other:
+        other.write("e")
+
+
+def by_lambda():
+    return lambda other: other.update(1)
+`,
+};
+
+it('does not bind a builtin-method name to a module whose alias the enclosing function rebinds', async () => {
+  await index(SHADOW);
+  // Only the genuine module-scope receiver reaches the module's functions.
+  expect(callers('src/pkg/other.py', 'update')).toEqual(['tests/shadow.py:real']);
+  expect(callers('src/pkg/other.py', 'write')).toEqual([]);
+});

@@ -26,7 +26,7 @@ import { isVisibleCppMacro, clearCppMacroVisibility } from './cpp-macro-visibili
 import { isCppConstructorRef, matchCppConstructor } from './cpp-constructor';
 import { gateSwiftTypeTarget, clearSwiftTypeVisibility, swiftExtendedConformances } from './swift-type-visibility';
 import { gateTypeParameter, clearTypeParameterMemos } from './type-parameters';
-import { resolveViaImport, resolvePhpImportedStaticCall, resolvePhpQualifiedClassRef, resolveJvmImport, extractImportMappings, extractReExports, loadCppIncludeDirs, isPhpIncludePathRef, isCobolCopybookRef, isNixPathImportRef, isJsPathImportRef, isBoundToOutOfRepoImport, clearImportResolverMemos, resolveImportPath, findPythonModuleFile, isExternalImport } from './import-resolver';
+import { resolveViaImport, resolvePhpImportedStaticCall, resolvePhpQualifiedClassRef, resolveJvmImport, extractImportMappings, extractReExports, loadCppIncludeDirs, isPhpIncludePathRef, isCobolCopybookRef, isNixPathImportRef, isJsPathImportRef, isBoundToOutOfRepoImport, clearImportResolverMemos, resolveImportPath, findPythonModuleFile, isExternalImport, isPythonReceiverRebound } from './import-resolver';
 import { ResolverPool, minRefsForPool, shouldEngageAdaptively } from './resolver-pool';
 import { resolveAliasBinding } from './alias-binding';
 import { detectFrameworks } from './frameworks';
@@ -2399,6 +2399,7 @@ export class ReferenceResolver {
    * serve; anything else stays a silent miss rather than a wrong edge.
    */
   private isPythonProjectModule(ref: UnresolvedRef, receiver: string): boolean {
+    if (isPythonReceiverRebound(ref, receiver, this.context)) return false;
     for (const imp of this.context.getImportMappings(ref.filePath, ref.language)) {
       if (imp.localName !== receiver) continue;
       // `import pkg.mod` / `import pkg.mod as m` binds the module `source`
