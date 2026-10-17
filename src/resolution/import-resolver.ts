@@ -2216,7 +2216,7 @@ function pythonModuleSymbolUncached(file: string, name: string, context: Resolut
   return undefined;
 }
 
-function findPythonModuleFile(
+export function findPythonModuleFile(
   mod: string,
   context: ResolutionContext,
   excludeFilePath: string

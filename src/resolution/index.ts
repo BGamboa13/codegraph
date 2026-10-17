@@ -26,7 +26,7 @@ import { isVisibleCppMacro, clearCppMacroVisibility } from './cpp-macro-visibili
 import { isCppConstructorRef, matchCppConstructor } from './cpp-constructor';
 import { gateSwiftTypeTarget, clearSwiftTypeVisibility, swiftExtendedConformances } from './swift-type-visibility';
 import { gateTypeParameter, clearTypeParameterMemos } from './type-parameters';
-import { resolveViaImport, resolvePhpImportedStaticCall, resolvePhpQualifiedClassRef, resolveJvmImport, extractImportMappings, extractReExports, loadCppIncludeDirs, isPhpIncludePathRef, isCobolCopybookRef, isNixPathImportRef, isJsPathImportRef, isBoundToOutOfRepoImport, clearImportResolverMemos, resolveImportPath, isExternalImport } from './import-resolver';
+import { resolveViaImport, resolvePhpImportedStaticCall, resolvePhpQualifiedClassRef, resolveJvmImport, extractImportMappings, extractReExports, loadCppIncludeDirs, isPhpIncludePathRef, isCobolCopybookRef, isNixPathImportRef, isJsPathImportRef, isBoundToOutOfRepoImport, clearImportResolverMemos, resolveImportPath, findPythonModuleFile, isExternalImport } from './import-resolver';
 import { ResolverPool, minRefsForPool, shouldEngageAdaptively } from './resolver-pool';
 import { resolveAliasBinding } from './alias-binding';
 import { detectFrameworks } from './frameworks';
@@ -2411,6 +2411,15 @@ export class ReferenceResolver {
           ? `${imp.source}${imp.exportedName}`
           : `${imp.source}.${imp.exportedName}`;
       if (resolveImportPath(specifier, ref.filePath, ref.language!, this.context)) {
+        return true;
+      }
+      // resolveImportPath only maps RELATIVE dotted paths; an ABSOLUTE package
+      // path (`app.db` from `from app import db`, or `import app.db as db`)
+      // resolves to null there, so fall back to the dotted-module file lookup
+      // — the same asymmetry resolvePythonModuleMember already handles. Without
+      // it, a builtin-method name served by an absolute module import
+      // (`db.get`) is dropped by the filter and loses its real `calls` edge.
+      if (findPythonModuleFile(specifier, this.context, ref.filePath)) {
         return true;
       }
     }

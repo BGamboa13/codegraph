@@ -1,0 +1,81 @@
+/**
+ * A Python src-layout package imported ABSOLUTELY (`from app import db`, or
+ * `import app.db as store`) whose member name collides with a built-in method
+ * (`db.get`, `store.write`) must still resolve to the project function — while
+ * the same name on a local collection (`d.get()`, `xs.append()`) must not.
+ */
+import { afterEach, beforeEach, expect, it } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { CodeGraph } from '../src';
+
+let root: string;
+let cg: CodeGraph | undefined;
+beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-py-module-member-')); });
+afterEach(() => { cg?.close(); cg = undefined; fs.rmSync(root, { recursive: true, force: true }); });
+
+async function index(files: Record<string, string>) {
+  for (const [file, text] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.writeFileSync(path.join(root, file), text);
+  }
+  cg = await CodeGraph.init(root, { index: true });
+}
+
+/** `file:qualifiedName` of everything with a `calls` edge into the named symbol. */
+function callers(file: string, qualifiedName: string): string[] {
+  const target = cg!.getNodesInFile(file).find((n) => n.qualifiedName === qualifiedName);
+  expect(target, `${file}:${qualifiedName}`).toBeDefined();
+  return cg!.getIncomingEdges(target!.id)
+    .filter((e) => e.kind === 'calls')
+    .map((e) => {
+      const src = cg!.getNode(e.source)!;
+      return `${src.filePath}:${src.qualifiedName}`;
+    })
+    .sort();
+}
+
+const FIXTURE = {
+  'pyproject.toml': '[project]\nname = "app"\n',
+  'src/app/__init__.py': '',
+  'src/app/db.py': 'def get(key):\n    return key\n\n\ndef fetch(key):\n    return key\n\n\ndef write(x):\n    pass\n',
+  'src/app/main.py': 'from app import db\nimport app.db as store\n\n\ndef use():\n    a = db.get("x")\n    b = db.fetch("y")\n\n\ndef use_alias():\n    store.write("z")\n',
+  'src/app/sub/__init__.py': '',
+  'src/app/sub/mod.py': 'from .. import db\n\n\ndef use_relative():\n    return db.get("z")\n',
+};
+
+it('resolves a builtin-method member through an absolute `from pkg import mod`', async () => {
+  await index(FIXTURE);
+  expect(callers('src/app/db.py', 'get')).toEqual([
+    'src/app/main.py:use',
+    'src/app/sub/mod.py:use_relative',
+  ]);
+});
+
+it('resolves a non-builtin member through the same absolute import', async () => {
+  await index(FIXTURE);
+  expect(callers('src/app/db.py', 'fetch')).toEqual(['src/app/main.py:use']);
+});
+
+it('resolves an alias of an absolute dotted module import (`import app.db as store`)', async () => {
+  await index(FIXTURE);
+  expect(callers('src/app/db.py', 'write')).toEqual(['src/app/main.py:use_alias']);
+});
+
+it('does not bind a builtin-method name on a local collection to a project function', async () => {
+  await index({
+    ...FIXTURE,
+    'src/app/local.py': 'def use_collections():\n    d = {}\n    xs = []\n    d.get("k")\n    xs.append(1)\n',
+  });
+  const targetNames = new Set<string>();
+  for (const node of cg!.getNodesInFile('src/app/local.py')) {
+    for (const edge of cg!.getOutgoingEdges(node.id)) {
+      if (edge.kind !== 'calls') continue;
+      const target = cg!.getNode(edge.target);
+      if (target) targetNames.add(target.qualifiedName);
+    }
+  }
+  expect(targetNames.has('get')).toBe(false);
+  expect(targetNames.has('append')).toBe(false);
+});
