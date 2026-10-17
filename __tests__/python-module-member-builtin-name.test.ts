@@ -128,3 +128,84 @@ it('does not bind a builtin-method name to a module whose alias the enclosing fu
   expect(callers('src/pkg/other.py', 'update')).toEqual(['tests/shadow.py:real']);
   expect(callers('src/pkg/other.py', 'write')).toEqual([]);
 });
+
+// Rebinding is scoped to the call's own function: these look like a rebinding
+// of `helpers` to a text scan, but none of them binds it where the call is.
+const SCOPED = {
+  'pyproject.toml': '[project]\nname = "pkg"\n',
+  'src/pkg/__init__.py': '',
+  'src/pkg/helpers.py': 'def build():\n    return 1\n\n\ndef items():\n    return []\n\n\ndef run():\n    return 1\n\n\ndef update(x=None):\n    return x\n\n\ndef get(key=None):\n    return key\n',
+  'tests/scoped.py': `from pkg import helpers
+
+
+def kwarg_line():
+    return dict(
+        helpers=helpers,
+    ) and helpers.build()
+
+
+def comprehension(seen):
+    return [y for y in helpers.items() if y in seen]
+
+
+def outer():
+    def inner(helpers):
+        return helpers
+    return helpers.run()
+
+
+def commented():  # shared by outreach, helpers, and others
+    return helpers.update()
+
+
+def local_import_alias():
+    from pkg import helpers as h
+    return h.get("k")
+
+
+def lambda_elsewhere():
+    pick = sorted([3, 1], key=lambda helpers: helpers)
+    helpers.update(pick)
+`,
+};
+
+it('keeps resolving a module member when the receiver text only looks rebound', async () => {
+  await index(SCOPED);
+  expect(callers('src/pkg/helpers.py', 'build')).toEqual(['tests/scoped.py:kwarg_line']);
+  expect(callers('src/pkg/helpers.py', 'items')).toEqual(['tests/scoped.py:comprehension']);
+  expect(callers('src/pkg/helpers.py', 'run')).toEqual(['tests/scoped.py:outer']);
+  expect(callers('src/pkg/helpers.py', 'update')).toEqual(['tests/scoped.py:commented', 'tests/scoped.py:lambda_elsewhere']);
+  expect(callers('src/pkg/helpers.py', 'get')).toEqual(['tests/scoped.py:local_import_alias']);
+});
+
+it('still treats a rebinding in the call\'s own function, or a nested one around it, as a local', async () => {
+  await index({
+    ...SCOPED,
+    'tests/own.py': `from pkg import helpers
+
+
+def comp_target(rows):
+    return [helpers.update(helpers) for helpers in rows]
+
+
+def nested_call(helpers):
+    def inner():
+        return helpers.run()
+    return inner
+
+
+def annotated():
+    helpers: dict = {}
+    return helpers.get("k")
+
+
+def augmented(helpers):
+    helpers += [1]
+    return helpers.items()
+`,
+  });
+  expect(callers('src/pkg/helpers.py', 'update')).toEqual(['tests/scoped.py:commented', 'tests/scoped.py:lambda_elsewhere']);
+  expect(callers('src/pkg/helpers.py', 'run')).toEqual(['tests/scoped.py:outer']);
+  expect(callers('src/pkg/helpers.py', 'get')).toEqual(['tests/scoped.py:local_import_alias']);
+  expect(callers('src/pkg/helpers.py', 'items')).toEqual(['tests/scoped.py:comprehension']);
+});
